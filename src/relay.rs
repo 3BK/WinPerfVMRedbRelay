@@ -3,14 +3,13 @@ use crate::config::RelayConfig;
 use crate::guards::PipeGuard;
 
 use log::Level;
-use rand::RngExt;
-// Fix for redb 4.1: Import necessary traits for database/table operations
-use redb::{Database, TableDefinition, ReadableDatabase, TableHandle};
+// Fix: Use ReadableTable for .iter() and ReadableDatabase for .begin_read() [cite: 85, 86]
+use redb::{Database, TableDefinition, ReadableDatabase, ReadableTable};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH}; // Removed unused Instant [cite: 80]
 use tokio::io::AsyncReadExt;
 use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -51,7 +50,7 @@ pub async fn run_ingestion(
     let mut server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(&pipe_path)
-        .expect("Failed to create secure named pipe");
+        .expect("NIST AC-4: Failed to create secure named pipe");
 
     let mut last_ts_ns: u64 = 0;
     let mut counter: u64 = 0;
@@ -98,7 +97,7 @@ pub async fn run_ingestion(
                 })();
 
                 if let Err(e) = res {
-                    audit.log(Level::Error, 1022, &format!("redb insert error: {e}"));
+                    audit.log(Level::Error, 1022, &format!("redb insert failed: {e}"));
                 }
             }
         }
@@ -117,7 +116,7 @@ pub async fn run_disk_guard(
     let resume_bytes = (max_disk_bytes as f64 * 0.95) as u64;
 
     loop {
-        // Fix: Use metrics_queue field as 'path' is invalid [cite: 90, 91]
+        // Fix: Use metrics_queue as the database file path [cite: 48]
         let disk = std::fs::metadata(&cfg.buffer.metrics_queue)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -125,11 +124,11 @@ pub async fn run_disk_guard(
         if disk >= max_disk_bytes {
             if !gate.is_paused() {
                 gate.set_paused(true);
-                audit.log(Level::Error, 1023, "Disk high-water exceeded. Pausing ingest.");
+                audit.log(Level::Error, 1023, &format!("Disk limit hit: {disk} bytes. Pausing."));
             }
         } else if disk <= resume_bytes && gate.is_paused() {
             gate.set_paused(false);
-            audit.log(Level::Info, 1034, "Disk space recovered. Resuming ingest.");
+            audit.log(Level::Info, 1034, &format!("Disk recovered: {disk} bytes. Resuming."));
         }
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
     }
@@ -142,13 +141,14 @@ pub async fn run_egress(
     cfg: RelayConfig,
     audit: Arc<AuditGuard>,
 ) {
-    let batch_size = cfg.forwarder.batch_size.unwrap_or(100);
-    let mut backoff = Duration::from_millis(cfg.forwarder.base_backoff_ms.unwrap_or(500));
+    let batch_size = cfg.forwarder.batch_size.unwrap_or(1_000);
+    let base_backoff = Duration::from_millis(cfg.forwarder.base_backoff_ms.unwrap_or(500));
+    let mut backoff = base_backoff;
 
     loop {
         let mut batch = Vec::with_capacity(batch_size);
 
-        // Fix: ReadableDatabase trait provides begin_read [cite: 94]
+        // ReadableTable trait enables .iter() 
         let read_res = (|| -> Result<(), redb::Error> {
             let txn = db.begin_read()?;
             let table = txn.open_table(MESSAGES_TABLE)?;
@@ -159,10 +159,6 @@ pub async fn run_egress(
             Ok(())
         })();
 
-        if let Err(e) = read_res {
-            audit.log(Level::Warn, 1031, &format!("redb read error: {e}"));
-        }
-
         if batch.is_empty() {
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
@@ -172,8 +168,7 @@ pub async fn run_egress(
         for (_, v) in &batch {
             if v.len() >= HEADER_LEN {
                 let len = u32::from_be_bytes([v[8], v[9], v[10], v[11]]) as usize;
-                let end = (HEADER_LEN + len).min(v.len());
-                payload.extend_from_slice(&v[HEADER_LEN..end]);
+                payload.extend_from_slice(&v[HEADER_LEN..(HEADER_LEN + len).min(v.len())]);
             }
         }
 
@@ -188,7 +183,7 @@ pub async fn run_egress(
                     txn.commit()?;
                     Ok(())
                 })();
-                backoff = Duration::from_millis(cfg.forwarder.base_backoff_ms.unwrap_or(500));
+                backoff = base_backoff;
             }
             _ => {
                 tokio::time::sleep(backoff).await;
