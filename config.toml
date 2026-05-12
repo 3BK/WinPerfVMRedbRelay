@@ -1,0 +1,49 @@
+[service]
+name = "WinPerfVMRedbRelay"
+display_name = "Windows Performance x VM Redb Relay"
+log_level = "info" # trace, debug, info, warn, error
+
+[ingest]
+named_pipe_path = "\\\\.\\pipe\\pdh_metrics"
+pipe_buffer_size = 65536
+
+[buffer]
+metrics_queue = "C:\\ProgramData\\WinPerfVMRedbRelay\\redb_data"
+max_disk_bytes = 4294967296         # 4 GiB
+max_age_seconds = 259200            # 72 hours
+retention_check_interval_seconds = 60
+
+[forwarder]
+pingora_url = "https://metrics-proxy.internal:8443/api/v1/import"
+batch_size = 1000
+request_timeout_seconds = 30
+drain_timeout_seconds = 30
+base_backoff_ms = 500
+max_backoff_ms = 30000
+max_jitter_ms = 2000
+
+[forwarder.connection_pool]
+enabled = true
+idle_timeout_seconds = 90
+max_idle_connections = 2
+
+[tls]
+client_cert_sha1 = "<sha1 hash>"
+server_sha256_pin = "6f9a3c316744040a454d454a88941785f83863776a3e6f988849b233a0279883"
+min_version = "1.2"
+cipher_suites = [
+    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    "TLS_AES_256_GCM_SHA384",
+    "TLS_CHACHA20_POLY1305_SHA256"
+]
+curves = ["P-384", "P-256"]
+
+[audit]
+audit_source_name = "WinPerfVMFjallRelay"
+event_log = "Application"
+cert_expiry_warning_days = 30
+log_level = "Info"
+
+[version]
+value = "1.0.0"
